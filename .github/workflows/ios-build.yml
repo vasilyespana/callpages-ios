@@ -1,0 +1,48 @@
+name: iOS build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+
+      - name: Build (unsigned IPA for AltStore / TrollStore sideloading)
+        run: |
+          xcodebuild -project CallPages.xcodeproj \
+            -scheme CallPages \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/CallPages.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+          APP_PATH="build/CallPages.xcarchive/Products/Applications/CallPages.app"
+          mkdir -p Payload && cp -R "$APP_PATH" Payload/
+          zip -r "callpages-${GITHUB_REF_NAME}.ipa" Payload
+          rm -rf Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: callpages-ipa
+          path: "callpages-*.ipa"
+
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "callpages-*.ipa"
