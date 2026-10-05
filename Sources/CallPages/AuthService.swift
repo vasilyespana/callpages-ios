@@ -13,14 +13,13 @@ final class AuthService: ObservableObject {
     private var authSession: ASWebAuthenticationSession?
 
     private init() {
-        // Check for existing session cookie.
+        // Restore any persisted session (survives backgrounding/restarts).
+        SessionStore.shared.restoreSessionCookie()
         checkSession()
     }
 
     func checkSession() {
-        guard let url = URL(string: base) else { return }
-        let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
-        isSignedIn = cookies.contains { $0.name == "session" || $0.name == "cp_session" }
+        isSignedIn = SessionStore.shared.hasSession()
     }
 
     func signIn() {
@@ -45,11 +44,7 @@ final class AuthService: ObservableObject {
         guard let url = URL(string: "\(base)/api/auth/logout") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] _, _, _ in
             DispatchQueue.main.async {
-                if let baseURL = URL(string: self?.base ?? "") {
-                    HTTPCookieStorage.shared.cookies(for: baseURL)?.forEach {
-                        HTTPCookieStorage.shared.deleteCookie($0)
-                    }
-                }
+                SessionStore.shared.clear()
                 self?.isSignedIn = false
             }
         }.resume()
@@ -64,6 +59,30 @@ private final class ContextProvider: NSObject, ASWebAuthenticationPresentationCo
 
 // MARK: - API client
 
+enum APIError: Error {
+    case unauthorized
+    case http(Int)
+    case decoding
+}
+
+struct CreatePageResponse: Codable {
+    let ok: Bool?
+    let page: Page?
+}
+
+struct ResearchResponse: Codable {
+    let ok: Bool?
+    let products_found: Int?
+    let products_kept: Int?
+    let error: String?
+    let message: String?
+}
+
+struct ResearchResult {
+    let productsFound: Int
+    let productsKept: Int
+}
+
 final class CallPagesAPI {
     static let shared = CallPagesAPI()
     private let base = "https://callpages.me"
@@ -71,11 +90,41 @@ final class CallPagesAPI {
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
         guard let url = URL(string: base + path) else { throw URLError(.badURL) }
-        let (data, resp) = try await URLSession.shared.data(from: url)
-        if let http = resp as? HTTPURLResponse, http.statusCode == 401 {
-            throw URLError(.userAuthenticationRequired)
+        var req = URLRequest(url: url)
+        req.httpShouldHandleCookies = true
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        SessionStore.shared.captureSessionCookie()
+        if let http = resp as? HTTPURLResponse {
+            if http.statusCode == 401 { throw APIError.unauthorized }
+            guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
         }
-        return try decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIError.decoding
+        }
+    }
+
+    private func post<T: Decodable>(_ path: String, body: [String: Any?]) async throws -> T {
+        guard let url = URL(string: base + path) else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpShouldHandleCookies = true
+        // Strip nils.
+        let clean = body.compactMapValues { $0 }
+        req.httpBody = try JSONSerialization.data(withJSONObject: clean)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        SessionStore.shared.captureSessionCookie()
+        if let http = resp as? HTTPURLResponse {
+            if http.statusCode == 401 { throw APIError.unauthorized }
+            guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
+        }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIError.decoding
+        }
     }
 
     func pages() async throws -> [Page] {
@@ -85,6 +134,32 @@ final class CallPagesAPI {
 
     func page(id: String) async throws -> Page {
         try await get("/api/pages/\(id)")
+    }
+
+    func createPage(title: String, businessName: String, template: String, website: String?) async throws -> Page {
+        var body: [String: Any?] = [
+            "title": title,
+            "business_name": businessName,
+            "template": template,
+        ]
+        if let website {
+            body["links"] = ["website": website]
+        }
+        let r: CreatePageResponse = try await post("/api/pages", body: body)
+        guard let page = r.page else { throw APIError.decoding }
+        return page
+    }
+
+    func researchPage(pageId: String) async throws -> ResearchResult {
+        let r: ResearchResponse = try await post("/api/pages/\(pageId)/research", body: [:])
+        guard r.ok == true else {
+            throw NSError(domain: "research", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: r.message ?? r.error ?? "research failed"])
+        }
+        return ResearchResult(
+            productsFound: r.products_found ?? 0,
+            productsKept: r.products_kept ?? 0
+        )
     }
 
     func calls(pageId: String? = nil) async throws -> [CallLog] {

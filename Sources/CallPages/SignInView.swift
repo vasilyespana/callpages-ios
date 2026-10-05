@@ -34,6 +34,8 @@ struct SignInView: View {
 struct MainTabView: View {
     var body: some View {
         TabView {
+            DashboardView()
+                .tabItem { Label("Dashboard", systemImage: "square.grid.2x2") }
             PagesView()
                 .tabItem { Label("Pages", systemImage: "doc.text") }
             CallsView()
