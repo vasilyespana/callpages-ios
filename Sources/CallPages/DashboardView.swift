@@ -9,7 +9,10 @@ import WebKit
 /// public landing page instead of the dashboard, that is surfaced as an
 /// auth error, never silently.
 struct DashboardView: View {
-    @State private var loadState: LoadState = .loading
+    // Starts .loaded: the wrapper performs its own cookie-sync-then-load.
+    // (The pre-parity app started at .loading and nothing ever flipped it
+    // to .loaded, so the tab sat on a spinner forever.)
+    @State private var loadState: LoadState = .loaded
     @State private var webView: WKWebView?
 
     enum LoadState { case loading, loaded, authError }
@@ -17,28 +20,35 @@ struct DashboardView: View {
     var body: some View {
         NavigationStack {
             Group {
-                switch loadState {
-                case .loading:
-                    ProgressView("Loading dashboard…")
-                case .loaded:
-                    WebViewWrapper(webView: $webView, onAuthError: {
-                        loadState = .authError
-                    })
-                case .authError:
-                    VStack(spacing: 16) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.largeTitle).foregroundStyle(.orange)
-                        Text("Session expired")
-                            .font(.headline)
-                        Text("Your login session ended. Please sign in again.")
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("Sign in again") {
-                            AuthService.shared.isSignedIn = false
+                if AppConfig.isStubMode {
+                    ContentUnavailableView(
+                        "Dashboard",
+                        systemImage: "square.grid.2x2",
+                        description: Text("The web dashboard is disabled in stub mode. Use the tabs below — Pages, Calls and Appointments run on demo data."))
+                } else {
+                    switch loadState {
+                    case .loading:
+                        ProgressView("Loading dashboard…")
+                    case .loaded:
+                        WebViewWrapper(webView: $webView, onAuthError: {
+                            loadState = .authError
+                        })
+                    case .authError:
+                        VStack(spacing: 16) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.largeTitle).foregroundStyle(.orange)
+                            Text("Session expired")
+                                .font(.headline)
+                            Text("Your login session ended. Please sign in again.")
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Sign in again") {
+                                AuthService.shared.expireSession()
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .padding()
                     }
-                    .padding()
                 }
             }
             .navigationTitle("Dashboard")

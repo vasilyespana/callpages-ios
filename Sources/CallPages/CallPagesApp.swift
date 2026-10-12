@@ -12,11 +12,14 @@ struct CallPagesApp: App {
                 if !auth.isSignedIn {
                     SignInView()
                 } else if onboarded == nil {
-                    // Zero-pages gate: check on every launch.
+                    // Validate the session, then run the zero-pages
+                    // gate: check on every fresh launch.
                     ProgressView("Loading…")
                         .task {
-                            let hasPages = await checkHasPages()
-                            onboarded = hasPages
+                            await auth.validateSession()
+                            if auth.isSignedIn {
+                                onboarded = await checkHasPages()
+                            }
                         }
                 } else if onboarded == false {
                     NavigationStack {
@@ -29,11 +32,11 @@ struct CallPagesApp: App {
                 }
             }
             // Re-check the gate when returning from background — the world
-            // may have changed (but the SESSION persists via SessionStore).
+            // may have changed (but the SESSION persists via TokenStore).
             .onReceive(NotificationCenter.default.publisher(
                 for: UIApplication.didBecomeActiveNotification
             )) { _ in
-                auth.checkSession()
+                auth.appBecameActive()
             }
         }
     }
@@ -43,7 +46,7 @@ struct CallPagesApp: App {
             let pages = try await CallPagesAPI.shared.pages()
             return !pages.isEmpty
         } catch APIError.unauthorized {
-            await MainActor.run { auth.isSignedIn = false }
+            auth.expireSession()
             return false
         } catch {
             // On network error, don't trap the user in onboarding —

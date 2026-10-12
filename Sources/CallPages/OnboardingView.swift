@@ -45,7 +45,7 @@ struct OnboardingView: View {
             if hasPages { onFinished() }
         }
         .onChange(of: vm.sessionExpired) { expired in
-            if expired { AuthService.shared.isSignedIn = false }
+            if expired { AuthService.shared.expireSession() }
         }
     }
 
