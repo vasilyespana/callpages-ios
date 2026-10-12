@@ -1,0 +1,143 @@
+name: iOS
+
+# CallPages Merchant for iOS — PUBLIC DISTRIBUTION MIRROR.
+# Development lives in the (private) monorepo vasilyespana/callpages under
+# ios/; this repo mirrors that source so the unsigned IPA can be published
+# from a public repo: GitHub release assets in private repos are not
+# anonymously downloadable, and the SideStore source feed needs an
+# anonymous URL. See README.md.
+#
+# - PRs: build + unit tests + UI screenshot flow on the macOS runner's
+#   iPhone Simulator (MVR-VP simulator proof).
+# - Every run also produces the UNSIGNED IPA used by the free sideloading
+#   install channel (SideStore / AltStore / Sideloadly — see
+#   INSTALL-FREE.md). On version tags (ios-v*) the IPA is attached to a
+#   GitHub Release so it can be downloaded without a GitHub login.
+# Adapted from vasilyespana/callpages .github/workflows/ios.yml
+# (monorepo ios/** paths mapped to this repo's root layout).
+
+on:
+  pull_request:
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Resources/**"
+      - "project.yml"
+      - ".github/workflows/ios.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "Resources/**"
+      - "project.yml"
+      - ".github/workflows/ios.yml"
+    tags:
+      - "ios-v*"
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Deliberately NO Xcode pin: the macos-15 image's simulator runtimes
+      # match its default Xcode. Pinning an older Xcode (16.2) made actool
+      # fail with "No simulator runtime version ... available to use with
+      # iphonesimulator SDK" (monorepo CI, first run, 2026-10-11).
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build + unit & UI tests (iPhone Simulator)
+        run: |
+          set -o pipefail
+          # The runner image ships runtimes but no pre-created devices:
+          # create one for the selected Xcode's own iOS SDK version.
+          SDK_VER=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          RUNTIME_ID=$(xcrun simctl list -j runtimes | python3 -c "
+          import json, sys
+          sdk = sys.argv[1]
+          d = json.load(sys.stdin)
+          matches = [r for r in d['runtimes'] if r['version'] == sdk and r.get('isAvailable', True)]
+          print(matches[0]['identifier'] if matches else '')
+          " "$SDK_VER")
+          DEVICE_TYPE_ID=$(xcrun simctl list -j devicetypes | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          types = [t for t in d['devicetypes'] if t['name'].startswith('iPhone')]
+          types.sort(key=lambda t: t['name'])
+          pick = next((t for t in types if t['name'] == 'iPhone 16'), types[-1])
+          print(pick['identifier'])
+          ")
+          echo "SDK $SDK_VER runtime $RUNTIME_ID device type $DEVICE_TYPE_ID"
+          xcrun simctl create "CallPages CI iPhone" "$DEVICE_TYPE_ID" "$RUNTIME_ID"
+          # The destination MUST pin OS=$SDK_VER: an unpinned destination is
+          # read as OS:latest (the newest runtime on the image), which the
+          # freshly created device does not run — xcodebuild then reports
+          # "no device matching" even though the device exists.
+          xcodebuild test \
+            -project CallPages.xcodeproj \
+            -scheme CallPages \
+            -destination "platform=iOS Simulator,name=CallPages CI iPhone,OS=$SDK_VER" \
+            -resultBundlePath TestResults.xcresult \
+            | tee xcodebuild-test.log
+
+      - name: Export simulator screenshots (MVR-VP attachments)
+        if: always()
+        run: |
+          mkdir -p screenshots
+          xcrun xcresulttool export attachments \
+            --path TestResults.xcresult \
+            --output-path screenshots || true
+          find screenshots -type f | head -50 || true
+
+      - name: Upload simulator screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-screenshots
+          path: screenshots
+          if-no-files-found: ignore
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-log
+          path: xcodebuild-test.log
+          if-no-files-found: ignore
+
+      - name: Build unsigned IPA (free sideload channel)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project CallPages.xcodeproj \
+            -scheme CallPages \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/CallPages.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+          APP_PATH="build/CallPages.xcarchive/Products/Applications/CallPages.app"
+          mkdir -p Payload && cp -R "$APP_PATH" Payload/
+          zip -r "callpages-ios-unsigned.ipa" Payload
+          rm -rf Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: callpages-ios-unsigned-ipa
+          path: callpages-ios-unsigned.ipa
+
+      - name: Attach IPA to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/ios-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: callpages-ios-unsigned.ipa
